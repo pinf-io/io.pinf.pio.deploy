@@ -3,7 +3,12 @@ exports.for = function (API) {
 
 	const SSH = require("./ssh").for(API);
 	const RSYNC = require("./rsync").for(API);
-//	org.sourcemint.genesis.lib
+	var EXPORT = require("org.sourcemint.genesis.lib/lib/export").for(API).then(function (api) {
+		EXPORT = api;
+	});
+	// TODO: Wait in 'genesis.pinf.org' until all PGL init promises are resolved before
+	//       calling resolve/turn/spin methods.
+	// HACK: We assume the promises are resolved by the time we use them here.
 
 
 	// TODO: This implementation should come from the VM plugin and we just call it here.
@@ -73,16 +78,175 @@ exports.for = function (API) {
 
         	resolvedConfig.env.PIO_SERVICES_DIRPATH = resolvedConfig.env.PIO_SERVICES_DIRPATH || (resolvedConfig.env.PIO_HOME + "/services");
 
-			resolvedConfig.status = (previousResolvedConfig && previousResolvedConfig.status) || "unknown";
 
-			if (resolvedConfig.status === "provisioned") {
-				API.console.verbose("Skip provisioning prerequisites as previous status is provisioned.");
-//				return resolvedConfig;
+			function resolveServices () {
+
+				function prepareService (alias) {
+
+					// TODO: Support more advanced locators.
+					var sourcePath = API.PATH.dirname(require.resolve(resolvedConfig.services[alias].location + "/package.json"));
+					var serviceId = resolvedConfig.services[alias].location;
+					var preparedPath = API.PATH.join(API.getTargetPath(), "sync", serviceId);
+
+			    	API.console.verbose("Prepare service '" + serviceId + "' at path '" + preparedPath + "' from source path: " + sourcePath);
+
+					var serviceConfig = resolvedConfig.services[alias] = {
+						serviceId: serviceId,
+						local: {
+							path: preparedPath,
+							aspects: {
+								source: {
+									sourcePath: sourcePath,
+									path: preparedPath + "/source",
+									addFiles: {
+										"package.local.json": {
+											"@extends": {
+												"io.pinf.service": "{{env.PIO_SERVICE_HOME}}/{{env.PIO_SERVICE_DESCRIPTOR_PATH}}"
+											}
+										}
+									}
+								},
+								runtime: {
+									sourcePath: null,
+									path: preparedPath + "/runtime",
+									addFiles: {
+										"package.local.json": {
+											"@extends": {
+												"io.pinf.service": "{{env.PIO_SERVICE_HOME}}/{{env.PIO_SERVICE_DESCRIPTOR_PATH}}"
+											}
+										}
+									}
+								}
+							}
+						},
+						remote: {
+							path: null,
+							aspects: {
+								sync: {
+									path: null
+								},
+								source: {
+									path: null
+								},
+								runtime: {
+									path: null
+								}
+							},
+							addFiles: {
+								// Add the *Package Descriptor* that customizes the package
+								// to act as one *Service* in a *System* of many.
+								"package.service.json": {
+									"env": {},
+									"config": resolvedConfig.services[alias].config || {}
+								}
+							}
+						}
+					}
+
+					var env = serviceConfig.remote.addFiles["package.service.json"].env;
+					for (var name in resolvedConfig.env) {
+						env[name] = resolvedConfig.env[name];
+					}
+					env.PIO_SERVICE_HOME = resolvedConfig.env.PIO_SERVICES_DIRPATH + "/" + serviceConfig.serviceId;
+					env.PIO_SERVICE_ID_SAFE = serviceConfig.serviceId.replace(/\./g, "-");
+					env.PIO_SERVICE_LOG_BASEPATH = resolvedConfig.env.PIO_LOG_DIRPATH + "/" + env.PIO_SERVICE_ID_SAFE;
+					env.PIO_SERVICE_RUN_BASEPATH = resolvedConfig.env.PIO_RUN_DIRPATH + "/" + env.PIO_SERVICE_ID_SAFE;
+					env.PIO_SERVICE_DATA_BASEPATH = resolvedConfig.env.PIO_DATA_DIRPATH + "/" + env.PIO_SERVICE_ID_SAFE;
+
+					// NOTE: This MUST BE IDENTICAL FOR ALL SERVICES and is relative to PIO_SERVICE_HOME!
+					env.PIO_SERVICE_DESCRIPTOR_PATH = "package.service.json";
+
+					function resolveRuntimePath () {
+						var adapterBasePath = API.PATH.dirname(require.resolve(resolvedConfig.adapters.os + "/package.json"));
+
+						// TODO: Look at descriptor from adapter package to find template path
+						var templatePath = "runtimes";
+
+						// TODO: Determine template type by auto-scanning or declaration.
+						var templateType = "nodejs-server";
+
+						var runtimeBasePath = API.PATH.join(adapterBasePath, templatePath, templateType);
+
+						return API.Q.resolve(runtimeBasePath);
+					}
+
+					function resolveRemote () {
+
+						var remote = serviceConfig.remote;
+
+						remote.path = env.PIO_SERVICES_DIRPATH + "/" + serviceConfig.serviceId;
+
+						remote.aspects.sync.path = remote.path + "/sync";
+						remote.aspects.source.path = remote.aspects.sync.path + "/source";
+						remote.aspects.runtime.path = remote.aspects.sync.path + "/runtime";
+
+						return API.Q.nbind(API.PACKAGE.fromFile, API.PACKAGE)(API.PATH.join(serviceConfig.local.aspects.source.path, "package.json"), {
+							// We use the ENV variables of the REMOTE environment.
+							env: env
+						}).then(function (descriptor) {
+
+							var pioConfig = descriptor.configForLocator(API.LOCATOR.fromConfigId("pio.pinf.io/0"));
+							if (remote.addFiles["package.service.json"].config["pio.pinf.io/0"]) {
+								pioConfig = API.DEEPMERGE(pioConfig, remote.addFiles["package.service.json"].config["pio.pinf.io/0"]);
+							}
+
+							function normalize (pioConfig) {
+								// TODO: This should already be normalized by 'configForLocator'.
+								if (!pioConfig.on) pioConfig.on = {};
+								if (!pioConfig.on.postdeploy) {
+									pioConfig.on.postdeploy = "io-pinf-pio-postdeploy";
+								}
+								if (/^\./.test(pioConfig.on.postdeploy)) {
+									pioConfig.on.postdeploy = remote.aspects.source.path + "/" + pioConfig.on.postdeploy;
+								}
+								return pioConfig;
+							}
+							pioConfig = normalize(JSON.parse(JSON.stringify(pioConfig || {})));
+
+							var commands = remote.aspects.source.commands = [
+								'cd ' + remote.aspects.source.path
+							];
+							for (var name in env) {
+								commands.push('export ' + name + '=' + env[name]);
+							}
+							commands.push(pioConfig.on.postdeploy);
+						});
+					}
+
+					return resolveRuntimePath().then(function (runtimeSourcePath) {
+
+						serviceConfig.local.aspects.runtime.sourcePath = runtimeSourcePath;
+
+					}).then(function () {
+						return resolveRemote();
+					});
+			    }
+
+			    resolvedConfig.servicesOrder = API.DESCRIPTOR.sortObjByDepends(resolvedConfig.services);
+			    API.console.verbose("Sorted services:", resolvedConfig.servicesOrder);
+			    return API.Q.all(resolvedConfig.servicesOrder.map(function (alias) {
+			    	return prepareService(alias);
+			    }));
 			}
 
-			var api = makeAPI(resolvedConfig);
+			return resolveServices().then(function () {
 
-            function ensurePrerequisites(repeat) {
+resolvedConfig.t = Date.now();
+
+				return resolvedConfig;
+			});	           
+		});
+	}
+
+	exports.turn = function (resolvedConfig) {
+
+console.log("TURN pio.deploy", resolvedConfig);
+
+		var api = makeAPI(resolvedConfig);
+
+	    function uploadService (alias, serviceConfig) {
+
+			function ensurePrerequisites (repeat) {
             	/*
             	// Use when installing globally in say '/opt/' using username other than root.
                 function ensureGlobalPrerequisites() {
@@ -148,7 +312,17 @@ exports.for = function (API) {
                 }
 
                 return api.runRemoteCommands([
-                    'if [ ! -e ' + resolvedConfig.env.PIO_BIN_DIRPATH + '/activate ]; then echo "[pio:trigger-ensure-prerequisites]"; fi'
+                    'if [ ! -e ' + resolvedConfig.env.PIO_BIN_DIRPATH + '/activate ]; then echo "[pio:trigger-ensure-prerequisites]" exit 0; fi',
+	                'if [ ! -d "' + serviceConfig.remote.path + '" ]; then',
+	                '  mkdir -p ' + serviceConfig.remote.path,
+	//                "  " + sudoCommand + "chown -f " + state["pio.vm"].user + ":" + state["pio.vm"].user + " " + state["pio.service.deployment"].path,
+	                // NOTE: When deploying as root we need to give the group write access to allow other processes to access the files.
+	                // TODO: Narrow down file access by using different users and groups for different services depending on their relationships.
+	//                "  " + sudoCommand + "chmod -f g+wx " + state["pio.service.deployment"].path,
+	                'fi',
+	                // NOTE: When deploying as root we need to give the group write access to allow other processes to access the files.
+	                // TODO: Narrow down file access by using different users and groups for different services depending on their relationships.
+	//                sudoCommand + 'chmod -f g+wx "' + state["pio.service.deployment"].path + '/sync" || true',                	
                 ]).then(function(response) {
                     if (/\[pio:trigger-ensure-prerequisites\]/.test(response.stdout)) {
                         return ensureGlobalPrerequisites();
@@ -156,116 +330,81 @@ exports.for = function (API) {
                 });
             }
 
-            return ensurePrerequisites().then(function () {
+		    function prepareService () {
 
-//				resolvedConfig.status = "provisioned";
+		    	// HACK: Remove this once we check in PGL.
+		    	if (API.Q.isPromise(EXPORT)) throw new Error("'EXPORT' should be resolved to an object by now! We should never get here! Time to improve the hack!");
 
-				resolvedConfig.status = "unknown";
+				function prepareAspect (aspect) {
+			    	return EXPORT.export(
+			    		serviceConfig.local.aspects[aspect].sourcePath,
+			    		serviceConfig.local.aspects[aspect].path,
+			    		"snapshot"
+			    	).then(function () {
+			    		if (serviceConfig.local.aspects[aspect].addFiles["package.local.json"]) {
+							return EXPORT.addFile(
+								API.PATH.join(serviceConfig.local.aspects[aspect].path, "package.local.json"),
+								JSON.stringify(serviceConfig.local.aspects[aspect].addFiles["package.local.json"], null, 4)
+				    		);
+			    		}
+			    	});
+				}
 
-resolvedConfig.t = Date.now();
+				function writeServiceConfigs () {
+					return API.Q.all(Object.keys(serviceConfig.remote.addFiles).map(function (filename) {
+						return API.Q.nbind(API.FS.outputFile, API.FS)(
+							API.PATH.join(serviceConfig.local.path, filename),
+							JSON.stringify(serviceConfig.remote.addFiles[filename], null, 4),
+			    			"utf8"
+			    		);
+					}));
 
-				return resolvedConfig;
-            });
-		});
-	}
+				}
 
-	exports.turn = function (resolvedConfig) {
-
-console.log("TURN pio.deploy", resolvedConfig);
-
-		var api = makeAPI(resolvedConfig);
-
-		// TODO: Make this more configurable
-
-		function ensureServicePrerequisites (servicePath) {
-	        return api.runRemoteCommands([
-                'if [ ! -d "' + servicePath + '" ]; then',
-                '  mkdir -p ' + servicePath,
-//                "  " + sudoCommand + "chown -f " + state["pio.vm"].user + ":" + state["pio.vm"].user + " " + state["pio.service.deployment"].path,
-                // NOTE: When deploying as root we need to give the group write access to allow other processes to access the files.
-                // TODO: Narrow down file access by using different users and groups for different services depending on their relationships.
-//                "  " + sudoCommand + "chmod -f g+wx " + state["pio.service.deployment"].path,
-                'fi',
-                // NOTE: When deploying as root we need to give the group write access to allow other processes to access the files.
-                // TODO: Narrow down file access by using different users and groups for different services depending on their relationships.
-//                sudoCommand + 'chmod -f g+wx "' + state["pio.service.deployment"].path + '/sync" || true',
-	        ]);
-	    }
-
-	    function prepareService (sourcePath, serviceId, options) {
-
-	    	API.console.verbose("Prepare service '" + serviceId + "' from source path: " + sourcePath);
-
-	    	return API.Q.resolve(sourcePath);
-	    }
+				return API.Q.all([
+					prepareAspect("source"),
+					prepareAspect("runtime"),
+					writeServiceConfigs
+				]);
+		    }
 
 
-	    function uploadService (sourcePath, serviceId, options) {
+	    	API.console.verbose("Upload service '" + serviceConfig.serviceId + "' from '" + serviceConfig.local.path + "' to sync path: " + serviceConfig.remote.aspects.sync.path);
 
-			var servicePath = resolvedConfig.env.PIO_SERVICES_DIRPATH + "/" + serviceId;
-			var serviceSyncPath = servicePath + "/sync";
-
-	    	return API.Q.spread([
-	    		// Load descriptor and call VM to ensure minimum prerequisites exist.
-	    		API.Q.nbind(API.PACKAGE.fromFile, API.PACKAGE)(API.PATH.join(sourcePath, "package.json"), {
-					env: resolvedConfig.env
-				}).then(function (descriptor) {
-					return ensureServicePrerequisites(servicePath).then(function () {
-						return descriptor;
-					});
-				}),
-				// Get the service ready for upload.
-				prepareService(sourcePath, serviceId, options)
-	    	], function (descriptor, sourcePath) {
-
-		    	API.console.verbose("Upload service '" + serviceId + "' to sync path: " + serviceSyncPath);
-
-				return api.uploadFiles(sourcePath, serviceSyncPath).then(function () {
-
-					var pioConfig = descriptor.configForLocator(API.LOCATOR.fromConfigId("pio.pinf.io/0"));
-					function normalize (pioConfig) {
-						// TODO: This should already be normalized by 'configForLocator'.
-						if (!pioConfig.on) pioConfig.on = {};
-						if (!pioConfig.on.postdeploy) {
-							pioConfig.on.postdeploy = "io-pinf-pio-postdeploy";
-						}
-						if (/^\./.test(pioConfig.on.postdeploy)) {
-							pioConfig.on.postdeploy = serviceSyncPath + "/" + pioConfig.on.postdeploy;
-						}
-						return pioConfig;
-					}
-					pioConfig = normalize(JSON.parse(JSON.stringify(pioConfig || {})));
-
-					return api.runRemoteCommands([
-						'cd ' + servicePath,
-						'echo -e "' + JSON.stringify(options.programDescriptor || {}, null, 4).replace(/"/g, '\\"') + '" > "' + serviceSyncPath + '/package.program.json"',
-						'export PIO_SERVICE_HOME=' + servicePath,
-						'export PIO_SERVICE_ID_SAFE=' + serviceId.replace(/\./g, "-"),
-						'export PIO_SERVICE_LOG_BASEPATH=' + resolvedConfig.env.PIO_LOG_DIRPATH + "/" + serviceId.replace(/\./g, "-"),
-						'export PIO_SERVICE_RUN_BASEPATH=' + resolvedConfig.env.PIO_RUN_DIRPATH + "/" + serviceId.replace(/\./g, "-"),
-						'export PIO_SERVICE_DATA_BASEPATH=' + resolvedConfig.env.PIO_DATA_DIRPATH + "/" + serviceId.replace(/\./g, "-"),
-						pioConfig.on.postdeploy
-	                ], resolvedConfig.env);
-				});
+	    	return API.Q.all([
+	    		ensurePrerequisites(),
+	    		prepareService(alias, serviceConfig)
+	    	]).then(function () {
+				return api.uploadFiles(serviceConfig.local.path, serviceConfig.remote.aspects.sync.path);
 	    	});
 	    }
 
-	    var done = API.Q.resolve();
-	    API.DESCRIPTOR.sortObjByDepends(resolvedConfig.services).forEach(function (id) {
-	    	done = API.Q.when(done, function () {
-				return uploadService(
-					// TODO: Support more advanced locators.
-					API.PATH.dirname(require.resolve(resolvedConfig.services[id].location + "/package.json")),
-					resolvedConfig.services[id].location,
-					{
-						programDescriptor: {
-							config: resolvedConfig.services[id].config
-						}
-					}
-				);
-	    	});
+	    function postdeployService(alias, serviceConfig) {
+	    	API.console.verbose("Trigger postdeploy for service '" + serviceConfig.serviceId + "' at path: " + serviceConfig.remote.aspects.sync.path);
+	    	return api.runRemoteCommands(
+				serviceConfig.remote.aspects.source.commands,
+				serviceConfig.remote.addFiles["package.service.json"].env
+			);
+	    }
+
+
+	    API.console.verbose("Uploading services in parallel:");
+
+	    return API.Q.all(resolvedConfig.servicesOrder.map(function (alias) {
+			return uploadService(alias, resolvedConfig.services[alias]);
+	    })).then(function () {
+
+		    API.console.verbose("Running postdeploy in series:");
+
+		    var done = API.Q.resolve();
+		    resolvedConfig.servicesOrder.forEach(function (alias) {
+		    	done = API.Q.when(done, function () {
+					return postdeployService(alias, resolvedConfig.services[alias]);
+		    	});
+		    });
+		    return done;
+
 	    });
-	    return done;
 	}
 
 	return exports;
