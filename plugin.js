@@ -172,6 +172,7 @@ exports.for = function (API) {
 						env.PIO_SERVICE_DATA_BASEPATH = resolvedConfig.env.PIO_DATA_DIRPATH + "/" + env.PIO_SERVICE_ID_SAFE;
 
 						env.PIO_SERVICE_LIVE_INSTALL_DIRPATH = env.PIO_SERVICE_HOME + "/live/install";
+						env.PIO_SERVICE_LIVE_RUNTIME_DIRPATH = env.PIO_SERVICE_HOME + "/live/runtime";
 
 						// NOTE: This MUST BE IDENTICAL FOR ALL SERVICES and is relative to PIO_SERVICE_HOME!
 						env.PIO_SERVICE_DESCRIPTOR_PATH = "package.service.json";
@@ -200,6 +201,7 @@ exports.for = function (API) {
 								if (remote.addFiles["package.service.json"].config["pio.pinf.io/0"]) {
 									pioConfig = API.DEEPMERGE(pioConfig, remote.addFiles["package.service.json"].config["pio.pinf.io/0"]);
 								}
+								remote["pio.pinf.io/0"] = pioConfig;
 
 								API.console.debug("pioConfig", pioConfig);
 								var commands = [];
@@ -220,24 +222,28 @@ exports.for = function (API) {
 									'popd'
 								]);
 								if (pioConfig.on && pioConfig.on.postactivate) {
-									commands = commands.concat([
-										'pushd "' + env.PIO_SERVICE_LIVE_INSTALL_DIRPATH + '"',
-										'  ' + pioConfig.on.postactivate,
-										'popd'
-									]);
+									commands.push('pushd "' + env.PIO_SERVICE_LIVE_INSTALL_DIRPATH + '"');
+									if (Array.isArray(pioConfig.on.postactivate)) {
+										commands = commands.concat(pioConfig.on.postactivate);
+									} else {
+										commands.push(pioConfig.on.postactivate);
+									}
+									commands.push('popd');
 								}
 								remote.aspects.source.commands.postdeploy = commands;
 							});
 						}
 
-						return adapter.resolveServiceRuntimePath({
-							local: serviceConfig.local
-						}).then(function (runtimeSourcePath) {
+						return resolveRemote().then(function () {
 
-							serviceConfig.local.aspects.runtime.sourcePath = runtimeSourcePath;
+							return adapter.resolveServiceRuntimeTemplatePaths({
+								remote: serviceConfig.remote,
+								local: serviceConfig.local
+							}).then(function (runtimeTemplatePaths) {
 
-						}).then(function () {
-							return resolveRemote();
+								serviceConfig.local.aspects.runtime.sourcePath = runtimeTemplatePaths;
+
+							});
 						});
 				    }
 
@@ -303,11 +309,23 @@ resolvedConfig.t = Date.now();
 			    	if (API.Q.isPromise(EXPORT)) throw new Error("'EXPORT' should be resolved to an object by now! We should never get here! Time to improve the hack!");
 
 					function prepareAspect (aspect) {
-				    	return EXPORT.export(
-				    		serviceConfig.local.aspects[aspect].sourcePath,
-				    		serviceConfig.local.aspects[aspect].path,
-				    		"snapshot"
-				    	).then(function () {
+						var paths = serviceConfig.local.aspects[aspect].sourcePath;
+						if (!Array.isArray(paths)) {
+							paths = [
+								paths
+							];
+						}
+						var done = API.Q.resolve();
+						paths.forEach(function (path) {
+							done = API.Q.when(done, function () {
+						    	return EXPORT.export(
+						    		path,
+						    		serviceConfig.local.aspects[aspect].path,
+						    		"snapshot"
+						    	);
+							});
+						});
+						return done.then(function () {
 							return EXPORT.addFile(
 								API.PATH.join(serviceConfig.local.aspects[aspect].path, "package.local.json"),
 								JSON.stringify(serviceConfig.local.aspects[aspect].addFiles["package.local.json"], null, 4)
