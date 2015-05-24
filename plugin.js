@@ -114,7 +114,7 @@ exports.for = function (API) {
 										addFiles: {
 											"package.local.json": {
 												"@overlays": {
-													"io.pinf.service": "{{env.PIO_SERVICE_HOME}}/{{env.PIO_SERVICE_DESCRIPTOR_PATH}}"
+													"io.pinf.service": "../package.service.json"
 												}
 											}
 										}
@@ -125,7 +125,7 @@ exports.for = function (API) {
 										addFiles: {
 											"package.local.json": {
 												"@overlays": {
-													"io.pinf.service": "{{env.PIO_SERVICE_HOME}}/{{env.PIO_SERVICE_DESCRIPTOR_PATH}}"
+													"io.pinf.service": "../package.service.json"
 												}
 											}
 										}
@@ -155,6 +155,12 @@ exports.for = function (API) {
 									"package.service.json": {
 										"env": {},
 										"config": resolvedConfig.services[alias].config || {}
+									},
+									"program.json": {
+										"@extends": {
+											"serviceConfig": "./package.service.json"
+										},
+										"boot": resolvedConfig.services[alias].boot || {}
 									}
 								}
 							}
@@ -169,13 +175,21 @@ exports.for = function (API) {
 						env.PIO_SERVICE_ID_SAFE = env.PIO_SERVICE_ID.replace(/\./g, "-");
 						env.PIO_SERVICE_LOG_BASEPATH = resolvedConfig.env.PIO_LOG_DIRPATH + "/" + env.PIO_SERVICE_ID_SAFE;
 						env.PIO_SERVICE_RUN_BASEPATH = resolvedConfig.env.PIO_RUN_DIRPATH + "/" + env.PIO_SERVICE_ID_SAFE;
+						env.PIO_SERVICE_CACHE_BASEPATH = resolvedConfig.env.PIO_CACHE_DIRPATH + "/" + env.PIO_SERVICE_ID_SAFE;
 						env.PIO_SERVICE_DATA_BASEPATH = resolvedConfig.env.PIO_DATA_DIRPATH + "/" + env.PIO_SERVICE_ID_SAFE;
 
-						env.PIO_SERVICE_LIVE_INSTALL_DIRPATH = env.PIO_SERVICE_HOME + "/live/install";
-						env.PIO_SERVICE_LIVE_RUNTIME_DIRPATH = env.PIO_SERVICE_HOME + "/live/runtime";
+						env.PIO_SERVICE_ASPECT = "live";
+						env.PIO_SERVICE_LIVE_DIRPATH = env.PIO_SERVICE_HOME + "/live";
+						env.PIO_SERVICE_LIVE_INSTALL_DIRPATH = env.PIO_SERVICE_LIVE_DIRPATH + "/install";
+						env.PIO_SERVICE_LIVE_RUNTIME_DIRPATH = env.PIO_SERVICE_LIVE_DIRPATH + "/runtime";
+						env.PIO_SERVICE_ACTIVATE_FILEPATH = env.PIO_SERVICE_ACTIVATE_FILEPATH || (env.PIO_SERVICE_LIVE_DIRPATH + "/activate");
 
-						// NOTE: This MUST BE IDENTICAL FOR ALL SERVICES and is relative to PIO_SERVICE_HOME!
+						// NOTE: This MUST BE IDENTICAL FOR ALL SERVICES and is relative to `PIO_SERVICE_HOME/<aspect>`!
 						env.PIO_SERVICE_DESCRIPTOR_PATH = "package.service.json";
+
+
+						env.PINF_PROGRAM_PATH = env.PIO_SERVICE_LIVE_DIRPATH + "/program.json";
+
 
 						function resolveRemote () {
 
@@ -191,6 +205,8 @@ exports.for = function (API) {
 								env: env,
 								remote: remote
 							});
+
+							remote.addFiles["program.json"].boot.package = "./install/package.json";
 
 							return API.Q.nbind(API.PACKAGE.fromFile, API.PACKAGE)(API.PATH.join(serviceConfig.local.aspects.source.sourcePath, "package.json"), {
 								// We use the ENV variables of the REMOTE environment.
