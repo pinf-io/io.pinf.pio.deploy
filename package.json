@@ -1,0 +1,8 @@
+{
+  "name": "io.pinf.pio.deploy",
+  "version": "0.1.0",
+  "main": "plugin.js",
+  "dependencies": {
+    "org.sourcemint.genesis.lib": "0.1.x"
+  }
+}
