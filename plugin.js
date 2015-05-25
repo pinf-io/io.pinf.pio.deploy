@@ -142,7 +142,7 @@ exports.for = function (API) {
 										path: null,
 										commands: {
 											prerequisite: null,
-											postdeploy: null
+											postsync: null
 										}
 									},
 									runtime: {
@@ -233,8 +233,8 @@ exports.for = function (API) {
 								}
 								commands = commands.concat([
 									'pushd "' + env.PIO_SERVICE_HOME + '"',
-									'  echo "Calling sync/runtime/scripts/postdeploy.sh"',
-									'  "sync/runtime/scripts/postdeploy.sh"',
+									'  echo "Calling sync/runtime/scripts/postsync.sh"',
+									'  "sync/runtime/scripts/postsync.sh"',
 									'popd'
 								]);
 								if (pioConfig.on && pioConfig.on.postactivate) {
@@ -246,7 +246,7 @@ exports.for = function (API) {
 									}
 									commands.push('popd');
 								}
-								remote.aspects.source.commands.postdeploy = commands;
+								remote.aspects.source.commands.postsync = commands;
 							});
 						}
 
@@ -394,22 +394,22 @@ resolvedConfig.t = Date.now();
 		    return deferred.promise;
 		}
 
-		function postdeployServices () {
-		    function postdeployService(alias, serviceConfig) {
-		    	API.console.verbose("Trigger postdeploy for service '" + serviceConfig.serviceId + "' at path: " + serviceConfig.remote.aspects.sync.path);
-		    	API.console.debug("Commands", serviceConfig.remote.aspects.source.commands.postdeploy);
+		function postsyncServices () {
+		    function postsyncService(alias, serviceConfig) {
+		    	API.console.verbose("Trigger postsync for service '" + serviceConfig.serviceId + "' at path: " + serviceConfig.remote.aspects.sync.path);
+		    	API.console.debug("Commands", serviceConfig.remote.aspects.source.commands.postsync);
 		    	return api.runRemoteCommands(
-					serviceConfig.remote.aspects.source.commands.postdeploy,
+					serviceConfig.remote.aspects.source.commands.postsync,
 					serviceConfig.remote.addFiles["package.service.json"].env
 				);
 		    }
 
-		    API.console.verbose("Running postdeploy in series:");
+		    API.console.verbose("Running postsync in series:");
 
 		    var done = API.Q.resolve();
 		    resolvedConfig.servicesOrder.forEach(function (alias) {
 		    	done = API.Q.when(done, function () {
-					return postdeployService(alias, resolvedConfig.services[alias]);
+					return postsyncService(alias, resolvedConfig.services[alias]);
 		    	});
 		    });
 		    return done;
@@ -418,7 +418,7 @@ resolvedConfig.t = Date.now();
 	    return ensurePrerequisites().then(function () {
 	    	return uploadServices();
 	    }).then(function () {
-	    	return postdeployServices();
+	    	return postsyncServices();
 	    });
 	}
 
