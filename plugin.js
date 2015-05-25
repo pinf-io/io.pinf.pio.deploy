@@ -224,10 +224,10 @@ exports.for = function (API) {
 								for (var name in env) {
 									commands.push('export ' + name + '=' + env[name]);
 								}
-								if (pioConfig.on && pioConfig.on.postsync) {
+								if (pioConfig.on && pioConfig.on.prepostsync) {
 									commands = commands.concat([
 										'pushd "' + remote.aspects.source.path + '"',
-										'  ' + pioConfig.on.postsync,
+										'  ' + pioConfig.on.prepostsync,
 										'popd'
 									]);
 								}

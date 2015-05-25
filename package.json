@@ -1,5 +1,5 @@
 {
-  "name": "io.pinf.pio.deploy",
+  "name": "io.pinf.pio.sync",
   "version": "0.1.0",
   "main": "plugin.js",
   "dependencies": {
