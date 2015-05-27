@@ -5,47 +5,115 @@ const VFS_SOCKET_WORKER = require('vfs-socket/worker').Worker;
 const VFS_SOCKET_TRANSPORT = require('vfs-socket/worker').smith.Transport;
 const BUNYAN = require('bunyan');
 
+const STREAM_ROUTER = require("stream-router");
+const MUX_DEMUX = require('mux-demux/msgpack');
+
 
 require('org.pinf.genesis.lib').forModule(require, module, function (API, exports) {
 
-console.log("API.config", API.config);
+	var keypair = API.FORGE.pki.rsa.generateKeyPair({
+		bits: 1024,
+		e: 0x10001
+	});
+	var incomingPrivateKey = keypair.privateKey;
 
-	console.log("SYNC vfs-socket-server API LOADED!", API.config);
 
+	var config = API.config["vfs-socket-server"];
 
 	var logger = BUNYAN.createLogger({
-		name: "io.pinf.proxy"
+		name: "io.pinf.pio.sync-vfs-socket-server"
 	});
 
+	logger.info("config", config);
+
+
 	var vfs = VFS_LOCAL({
-		root: __dirname,
+		root: "/",
 		checkSymlinks: true
 	});
 
 	var worker = new VFS_SOCKET_WORKER(vfs);
 
+
 	NET.createServer(function handler (socket) {
 
-		logger.log("Socket", socket);
+		logger.info("New socket connection");
 
-		var transport = new VFS_SOCKET_TRANSPORT(socket, socket, "worker");
+		var streamRouter = STREAM_ROUTER();
 
-		worker.connect(transport, function (err, remote) {
-			if (err) throw err;
+		function hookAuthorizedRoutes () {
 
+			streamRouter.addRoute("/vfs", function (socket, params) {
+
+				logger.info("New /vfs socket channel");
+
+				var transport = new VFS_SOCKET_TRANSPORT(socket, true, "io.pinf.pio.sync-vfs-socket-server-worker");
+
+				worker.connect(transport, function (err, remote) {
+					if (err) throw err;
+
+				});
+				worker.on("disconnect", function (err) {
+					if (err) throw err;
+
+				});
+			});
+
+		}
+
+		streamRouter.addRoute("/auth", function (socket, params) {
+
+			logger.info("New auth request");
+
+			socket.on("data", function (data) {
+
+				API.JWT.verify(data, config.publicKey, {
+					algorithms: [
+						'RS256'
+					]
+				}, function(err, decoded) {
+					if (err) {
+						console.error("err", err.stack);
+						logger.info("Auth failure");
+						socket.write("FAILED");
+						return;
+					}
+					if (
+						decoded &&
+						decoded.identityInfo === "TODO"
+					) {
+						logger.info("Auth success.");
+						try {
+							hookAuthorizedRoutes();
+							socket.write(API.FORGE.pki.publicKeyToPem(keypair.publicKey));
+						} catch (err) {
+							console.error(err.stack);
+						}
+						logger.info("Sent auth response.");
+						return;
+					}
+					socket.write("FAILED");
+					return;
+				});
+			});
 		});
-		worker.on("disconnect", function (err) {
-			if (err) throw err;
 
-		});
+
+	    var mdm = MUX_DEMUX({
+	        error: false
+	    })
+
+	    mdm.on("connection", streamRouter)
+
+		// TODO: Use 'incomingPrivateKey' (once set after auth) to decrypt incoming data then delegate to routes
+		// TODO: Use 'config.publicKey' to encrypt outgoing data then delegate to socket
+	    socket.pipe(mdm).pipe(socket)
 
 	}).listen(
-		API.config.port,
-		API.config.bind
+		config.port,
+		config.bind
 	);
-  });
 
-console.log("Server listening at: http://" + API.config.host + ":" + API.config.port);
-
+	logger.info("Server listening at", "http://" + config.bind + ":" + config.port);
 
 });

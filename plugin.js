@@ -8,44 +8,12 @@ if (require.main === module) {
 
 } else {
 
-	const VFS_LOCAL = require("vfs-local");
-	const VFS_LINT = require("vfs-lint");
-
-
 	exports.for = function (API) {
+
+		const VFS_LINT = require("vfs-lint");
 
 		const SSH = require("./ssh").for(API);
 		const RSYNC = require("./rsync").for(API);
-
-
-	/*
-	var vfs = VFS_LINT(VFS_LOCAL({
-		root: __dirname
-	}));
-
-	var root = "http://localhost:8080/rest/";
-
-	var vfs = VFS_LINT(VFS_LOCAL({
-		root: "/",
-		httpRoot: "http://localhost:8080/rest/",
-	}));
-
-
-	vfs.readdir("/", {}, function (err, meta) {
-		if (err) throw err;
-
-		var stream = meta.stream;
-		var parts = [];
-		stream.on("data", function (part) {
-		  parts.push(part);
-		});
-		stream.on("end", function () {
-	console.log("META", parts);
-	process.exit(1);
-		});
-	});
-	*/
-
 
 		// TODO: Wait in 'genesis.pinf.org' until all PGL init promises are resolved before
 		//       calling resolve/turn/spin methods.
@@ -63,16 +31,82 @@ if (require.main === module) {
 
 			var exports = {};
 
-		    exports.runRemoteCommands = function (commands, env) {
+			var vfs = null;
+
+		    exports.runRemoteCommands = function (commands, _env, forceSSH) {
+
+		    	var env = {};
+		    	for (var name in _env) {
+		    		env[name] = _env[name];
+		    	}
+		    	env.VERBOSE = (API.VERBOSE?"1":"");
+		    	env.DEBUG = (API.DEBUG?"1":"");
+
+				if (
+					forceSSH !== true &&
+					vfs &&
+					// Only use vfs socket connection if not syncing the sunc service itself.
+					// The sync service must be sycned via SSH as the connection would drop
+					// when the remote service is restarted.
+					env.PIO_SERVICE_ID_SAFE !== "io-pinf-pio-sync"
+				) {
+					return API.Q.denodeify(function (callback) {
+
+			            commands.unshift('if [ -e ' + resolvedConfig.env.PIO_BIN_DIRPATH + '/activate ]; then . ' + resolvedConfig.env.PIO_BIN_DIRPATH + '/activate; fi');
+
+		                API.console.verbose(("Calling commands via VFS '" + commands.join("; ") + "'").magenta);
+
+						vfs.spawn("/bin/bash", {
+							args: [
+								"-e",
+								"-s"
+							],
+							stdoutEncoding: "utf8",
+							env: env || {}
+						}, function (err, meta) {
+							if (err) {
+								console.error("Error while calling remote server via VFS. Tryign SSH instead. Error was:", err.stack);
+								return exports.runRemoteCommands(commands, _env, true).then(function () {
+									return callback(null);
+								}, callback);
+							}
+							var child = meta.process;
+							var stderr = [];
+							child.stderr.on("data", function (data) {
+								if (API.VERBOSE) {
+			                        process.stderr.write(data);
+			                    }
+			                    stderr.push(data.toString());
+							});
+							var stdout = [];
+							child.stdout.on("data", function (data) {
+								if (API.VERBOSE) {
+			                        process.stdout.write(data);
+			                    }
+			                    stdout.push(data.toString());
+							});
+							child.stdout.on("end", function () {
+			                    return callback(null, {
+			                        code: 0,
+			                        stdout: stdout.join(""),
+			                        stderr: stderr.join("")
+			                    });
+							});
+							commands.forEach(function (command) {
+								child.stdin.write(command + "\n");
+							});
+							child.stdin.end();
+						});
+					})();
+				}
+
 		    	if (env) {
 		    		for (var name in env) {
 	                    commands.unshift('export ' + name + '=' + env[name]);
 		    		}
-	                commands.unshift('export VERBOSE=' + (API.VERBOSE?"1":""));
-	                commands.unshift('export DEBUG=' + (API.DEBUG?"1":""));
 		    	}
 	            commands.unshift('if [ -e ' + resolvedConfig.env.PIO_BIN_DIRPATH + '/activate ]; then . ' + resolvedConfig.env.PIO_BIN_DIRPATH + '/activate; fi');
-	//			API.console.verbose(("Running remote commands '" + commands.join("; ") + "'.").magenta);
+
 	            return SSH.runRemoteCommands({
 					targetUser: resolvedConfig.ssh.user,
 		            targetHostname: resolvedConfig.ssh.host,
@@ -95,7 +129,29 @@ if (require.main === module) {
 		        });
 		    }
 
-		    return exports;
+		    function initVFSConnection () {
+				return require("./api/vfs-socket-client").for({
+					args: {
+						config: {
+							"vfs-socket-server": resolvedConfig["vfs-socket-server"]
+						}
+					}
+				}).then(function (api) {
+					return api.connect(function onEveryNewConnection (remoteVFS, statusEvents) {
+						statusEvents.on("destroy", function () {
+							vfs = null;
+						});
+						vfs = VFS_LINT(remoteVFS);
+					});
+				}).fail(function (err) {
+					console.error(err.stack);
+					throw err;
+				});
+		    }
+
+			return initVFSConnection().then(function () {
+			    return exports;
+			});
 		}
 
 		var exports = {};
@@ -323,165 +379,145 @@ if (require.main === module) {
 
 		exports.turn = function (resolvedConfig) {
 
-	/*
-	var vfs = VFS_LINT(VFS_LOCAL({
-		root: "/",
-		httpRoot: "http://" + resolvedConfig.vfs.host + ":" + resolvedConfig.vfs.port + resolvedConfig.vfs.route,
-	}));
+			return makeAPI(resolvedConfig).then(function (api) {
 
-	vfs.readdir("/", {}, function (err, meta) {
-		if (err) throw err;
+				function ensurePrerequisites (repeat) {
 
-		var stream = meta.stream;
-		var parts = [];
-		stream.on("data", function (part) {
-		  parts.push(part);
-		});
-		stream.on("end", function () {
-	console.log("META FROM REMOTE!", parts);
-	process.exit(1);
-		});
-	});
-	*/
+		            function ensureGlobalPrerequisites() {
+		                if (repeat) {
+		                    return API.Q.reject("Could not provision prerequisites on system!");
+		                }
+		                API.console.verbose("Ensuring global prerequisites");
+		                return api.runRemoteCommands(resolvedConfig.remote.commands.prerequisite).then(function() {
+		                    return ensurePrerequisites(true);
+		                });
+		            }
 
-			var api = makeAPI(resolvedConfig);
+		            var commands = [
+		                'if [ ! -e "' + resolvedConfig.env.PIO_BIN_DIRPATH + '/activate" ]; then',
+		                '  echo "[pio:trigger-ensure-prerequisites]";',
+		                '  exit 0;',
+		                'fi',
+		            ];
 
-			function ensurePrerequisites (repeat) {
+		            resolvedConfig.servicesOrder.forEach(function (alias) {
+		            	commands = commands.concat(resolvedConfig.services[alias].remote.aspects.source.commands.prerequisite);
+				    });
 
-	            function ensureGlobalPrerequisites() {
-	                if (repeat) {
-	                    return API.Q.reject("Could not provision prerequisites on system!");
-	                }
-	                API.console.verbose("Ensuring global prerequisites");
-	                return api.runRemoteCommands(resolvedConfig.remote.commands.prerequisite).then(function() {
-	                    return ensurePrerequisites(true);
-	                });
-	            }
-
-	            var commands = [
-	                'if [ ! -e "' + resolvedConfig.env.PIO_BIN_DIRPATH + '/activate" ]; then',
-	                '  echo "[pio:trigger-ensure-prerequisites]";',
-	                '  exit 0;',
-	                'fi',
-	            ];
-
-	            resolvedConfig.servicesOrder.forEach(function (alias) {
-	            	commands = commands.concat(resolvedConfig.services[alias].remote.aspects.source.commands.prerequisite);
-			    });
-
-	            return api.runRemoteCommands(commands).then(function(response) {
-	                if (/\[pio:trigger-ensure-prerequisites\]/.test(response.stdout)) {
-	                    return ensureGlobalPrerequisites();
-	                }
-	            });
-	        }
+		            return api.runRemoteCommands(commands).then(function(response) {
+		                if (/\[pio:trigger-ensure-prerequisites\]/.test(response.stdout)) {
+		                    return ensureGlobalPrerequisites();
+		                }
+		            });
+		        }
 
 
-		    function uploadServices () {
+			    function uploadServices () {
 
-			    function uploadService (alias, serviceConfig) {
+				    function uploadService (alias, serviceConfig) {
 
-				    function prepareService () {
+					    function prepareService () {
 
-				    	// HACK: Remove this once we check in PGL.
-				    	if (API.Q.isPromise(EXPORT)) throw new Error("'EXPORT' should be resolved to an object by now! We should never get here! Time to improve the hack!");
+					    	// HACK: Remove this once we check in PGL.
+					    	if (API.Q.isPromise(EXPORT)) throw new Error("'EXPORT' should be resolved to an object by now! We should never get here! Time to improve the hack!");
 
-						function prepareAspect (aspect) {
-							var paths = serviceConfig.local.aspects[aspect].sourcePath;
-							if (!Array.isArray(paths)) {
-								paths = [
-									paths
-								];
-							}
-							var done = API.Q.resolve();
-							paths.forEach(function (path) {
-								done = API.Q.when(done, function () {
-							    	return EXPORT.export(
-							    		path,
-							    		serviceConfig.local.aspects[aspect].path,
-							    		"snapshot"
-							    	);
+							function prepareAspect (aspect) {
+								var paths = serviceConfig.local.aspects[aspect].sourcePath;
+								if (!Array.isArray(paths)) {
+									paths = [
+										paths
+									];
+								}
+								var done = API.Q.resolve();
+								paths.forEach(function (path) {
+									done = API.Q.when(done, function () {
+								    	return EXPORT.export(
+								    		path,
+								    		serviceConfig.local.aspects[aspect].path,
+								    		"snapshot"
+								    	);
+									});
 								});
-							});
-							return done.then(function () {
-								return EXPORT.addFile(
-									API.PATH.join(serviceConfig.local.aspects[aspect].path, "package.local.json"),
-									JSON.stringify(serviceConfig.local.aspects[aspect].addFiles["package.local.json"], null, 4)
-					    		);
-					    	});
-						}
-
-						function writeServiceConfigs () {
-							return API.Q.all(Object.keys(serviceConfig.remote.addFiles).map(function (filename) {
-								return API.Q.denodeify(function (callback) {
-									return API.FS.outputFile(
-										API.PATH.join(serviceConfig.local.path, filename),
-										JSON.stringify(serviceConfig.remote.addFiles[filename], null, 4),
-						    			"utf8",
-						    			callback
+								return done.then(function () {
+									return EXPORT.addFile(
+										API.PATH.join(serviceConfig.local.aspects[aspect].path, "package.local.json"),
+										JSON.stringify(serviceConfig.local.aspects[aspect].addFiles["package.local.json"], null, 4)
 						    		);
-								})();
-							}));
+						    	});
+							}
 
-						}
+							function writeServiceConfigs () {
+								return API.Q.all(Object.keys(serviceConfig.remote.addFiles).map(function (filename) {
+									return API.Q.denodeify(function (callback) {
+										return API.FS.outputFile(
+											API.PATH.join(serviceConfig.local.path, filename),
+											JSON.stringify(serviceConfig.remote.addFiles[filename], null, 4),
+							    			"utf8",
+							    			callback
+							    		);
+									})();
+								}));
 
-						return API.Q.all([
-							prepareAspect("source"),
-							prepareAspect("runtime"),
-							writeServiceConfigs()
-						]).then(function () {
-							return FSINDEX.indexAndWriteForm(serviceConfig.local.path, "asis");
-						});
+							}
+
+							return API.Q.all([
+								prepareAspect("source"),
+								prepareAspect("runtime"),
+								writeServiceConfigs()
+							]).then(function () {
+								return FSINDEX.indexAndWriteForm(serviceConfig.local.path, "asis");
+							});
+					    }
+
+
+				    	API.console.verbose("Upload service '" + serviceConfig.serviceId + "' from '" + serviceConfig.local.path + "' to sync path: " + serviceConfig.remote.aspects.sync.path);
+
+				    	return prepareService().then(function () {
+							return api.uploadFiles(serviceConfig.local.path, serviceConfig.remote.aspects.sync.path);
+				    	});
 				    }
 
+				    API.console.verbose("Uploading services in parallel:");
 
-			    	API.console.verbose("Upload service '" + serviceConfig.serviceId + "' from '" + serviceConfig.local.path + "' to sync path: " + serviceConfig.remote.aspects.sync.path);
+				    var deferred = API.Q.defer();
+					var throttle = API.Q.Throttle(5);
+					throttle.on("error", deferred.reject);
+					throttle.on("done", deferred.resolve);
+					resolvedConfig.servicesOrder.forEach(function (alias) {
+						throttle.when([alias], function(alias) {
+							return uploadService(alias, resolvedConfig.services[alias]);
+						});
+				    });
+				    return deferred.promise;
+				}
 
-			    	return prepareService().then(function () {
-						return api.uploadFiles(serviceConfig.local.path, serviceConfig.remote.aspects.sync.path);
-			    	});
-			    }
+				function postsyncServices () {
+				    function postsyncService(alias, serviceConfig) {
+				    	API.console.verbose("Trigger postsync for service '" + serviceConfig.serviceId + "' at path: " + serviceConfig.remote.aspects.sync.path);
+				    	API.console.debug("Commands", serviceConfig.remote.aspects.source.commands.postsync);
+				    	return api.runRemoteCommands(
+							serviceConfig.remote.aspects.source.commands.postsync,
+							serviceConfig.remote.addFiles["package.service.json"].env
+						);
+				    }
 
-			    API.console.verbose("Uploading services in parallel:");
+				    API.console.verbose("Running postsync in series:");
 
-			    var deferred = API.Q.defer();
-				var throttle = API.Q.Throttle(5);
-				throttle.on("error", deferred.reject);
-				throttle.on("done", deferred.resolve);
-				resolvedConfig.servicesOrder.forEach(function (alias) {
-					throttle.when([alias], function(alias) {
-						return uploadService(alias, resolvedConfig.services[alias]);
-					});
+				    var done = API.Q.resolve();
+				    resolvedConfig.servicesOrder.forEach(function (alias) {
+				    	done = API.Q.when(done, function () {
+							return postsyncService(alias, resolvedConfig.services[alias]);
+				    	});
+				    });
+				    return done;
+				}
+
+			    return ensurePrerequisites().then(function () {
+			    	return uploadServices();
+			    }).then(function () {
+			    	return postsyncServices();
 			    });
-			    return deferred.promise;
-			}
-
-			function postsyncServices () {
-			    function postsyncService(alias, serviceConfig) {
-			    	API.console.verbose("Trigger postsync for service '" + serviceConfig.serviceId + "' at path: " + serviceConfig.remote.aspects.sync.path);
-			    	API.console.debug("Commands", serviceConfig.remote.aspects.source.commands.postsync);
-			    	return api.runRemoteCommands(
-						serviceConfig.remote.aspects.source.commands.postsync,
-						serviceConfig.remote.addFiles["package.service.json"].env
-					);
-			    }
-
-			    API.console.verbose("Running postsync in series:");
-
-			    var done = API.Q.resolve();
-			    resolvedConfig.servicesOrder.forEach(function (alias) {
-			    	done = API.Q.when(done, function () {
-						return postsyncService(alias, resolvedConfig.services[alias]);
-			    	});
-			    });
-			    return done;
-			}
-
-		    return ensurePrerequisites().then(function () {
-		    	return uploadServices();
-		    }).then(function () {
-		    	return postsyncServices();
-		    });
+			});			    
 		}
 
 		return exports;

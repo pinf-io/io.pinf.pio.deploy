@@ -17,7 +17,7 @@ exports.for = function (API) {
 		ASSERT.equal(typeof options.targetPath, "string");
 		ASSERT.equal(typeof options.keyPath, "string");
 
-		console.log(("Sync source '" + options.sourcePath + "' to vm at '" + options.targetPath + "'").magenta);
+		API.console.verbose(("Sync source '" + options.sourcePath + "' to vm at '" + options.targetPath + "'").magenta);
 
 		var args = [
 			'-avz', '--compress',
@@ -49,12 +49,16 @@ exports.for = function (API) {
 		});
 		proc.on('error', callback);
 		proc.stdout.on('data', function (data) {
-			process.stdout.write(data);
+			if (API.VERBOSE) {
+				process.stdout.write(data);
+			}
 		});
 		var stderr = [];
 		proc.stderr.on('data', function (data) {
 			stderr.push(data.toString());
-			process.stderr.write(data);
+			if (API.VERBOSE) {
+				process.stderr.write(data);
+			}
 		});
 		return proc.on('close', function (code) {
 			if (code !== 0) {

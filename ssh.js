@@ -21,7 +21,7 @@ exports.for = function (API) {
                 API.ASSERT.equal(typeof options.keyPath, "string");
                 API.ASSERT.equal(typeof options.workingDirectory, "string");
 
-                console.log(("Calling commands '" + options.commands.join("; ") + "' (identity: " + options.targetUser + " / " + options.keyPath + ") on vm '" + options.targetHostname + "' at path '" + options.workingDirectory + "'").magenta);
+                API.console.verbose(("Calling commands '" + options.commands.join("; ") + "' (identity: " + options.targetUser + " / " + options.keyPath + ") on vm '" + options.targetHostname + "' at path '" + options.workingDirectory + "'").magenta);
 
                 var args = [
                     '-o', 'ConnectTimeout=5',
@@ -34,7 +34,7 @@ exports.for = function (API) {
                     'cd ' + options.workingDirectory + '; bash -e -s'
                 ];
 
-                console.log(("Run: ssh " + args.join(" ")).magenta);
+                API.console.verbose(("Run: ssh " + args.join(" ")).magenta);
 
                 var env = process.env;
                 if (options.env) {
@@ -55,12 +55,16 @@ exports.for = function (API) {
                 var stdout = [];
                 proc.stdout.on('data', function (data) {
                     stdout.push(data.toString());
-                    process.stdout.write(data);
+                    if (API.VERBOSE) {
+                        process.stdout.write(data);
+                    }
                 });
                 var stderr = [];
                 proc.stderr.on('data', function (data) {
                     stderr.push(data.toString());
-                    process.stderr.write(data);
+                    if (API.VERBOSE) {
+                        process.stderr.write(data);
+                    }
                 });
                 proc.on('close', function (code) {
                     if (timeoutInterval) {
