@@ -195,7 +195,7 @@ if (require.main === module) {
 
 							// TODO: Support more advanced locators.
 							var sourcePath = API.PATH.dirname(require.resolve(resolvedConfig.services[alias].location + "/package.json"));
-							var serviceId = resolvedConfig.services[alias].location;
+							var serviceId = alias;
 							var preparedPath = API.PATH.join(API.getTargetPath(), "sync", serviceId);
 
 					    	API.console.verbose("Prepare service '" + serviceId + "' at path '" + preparedPath + "' from source path: " + sourcePath);
