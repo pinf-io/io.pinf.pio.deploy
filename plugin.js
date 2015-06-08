@@ -25,11 +25,14 @@ if (require.main === module) {
 			FSINDEX = api;
 		});
 
-
 		// TODO: This implementation should come from the VM plugin and we just call it here.
 		function makeAPI (resolvedConfig) {
 
-			var exports = {};
+			if (makeAPI.exports) {
+				return API.Q.resolve(makeAPI.exports);
+			}
+
+			var exports = makeAPI.exports = {};
 
 			var vfs = null;
 
@@ -118,6 +121,9 @@ if (require.main === module) {
 		    }
 
 		    exports.uploadFiles = function (sourcePath, targetPath) {
+
+		    	// TODO: Use VFS connection to upload files if available.
+
 				return API.Q.denodeify(RSYNC.sync)({
 		            sourcePath: sourcePath,
 		            targetPath: targetPath,
@@ -129,21 +135,35 @@ if (require.main === module) {
 		        });
 		    }
 
+		    exports.rpc = function (method, args) {
+		    	if (!vfs) {
+		    		return null;
+		    	}
+		    	return vfs.rpc("VFS_RPC_API", method, args);
+		    }
+
 		    function initVFSConnection () {
-				return require("./api/vfs-socket-client").for({
+		    	if (initVFSConnection.status) {
+		    		return API.Q.resolve(initVFSConnection.status);
+		    	}
+		    	initVFSConnection.status = "pending";
+				return API.Q.when(require("./api/vfs-socket-client").for({
 					args: {
 						config: {
 							"vfs-socket-server": resolvedConfig["vfs-socket-server"]
 						}
 					}
-				}).then(function (api) {
+				})).then(function (api) {
 					return api.connect(function onEveryNewConnection (remoteVFS, statusEvents) {
 						statusEvents.on("destroy", function () {
 							vfs = null;
+							initVFSConnection.status = "pending";
 						});
 						vfs = VFS_LINT(remoteVFS);
+				    	initVFSConnection.status = "connected";
 					});
 				}).fail(function (err) {
+					initVFSConnection.status = null;
 					console.error(err.stack);
 					throw err;
 				});
@@ -204,6 +224,9 @@ if (require.main === module) {
 								serviceId: serviceId,
 								local: {
 									path: preparedPath,
+									hashes: {
+										".smg.form.json": null
+									},
 									aspects: {
 										source: {
 											sourcePath: sourcePath,
@@ -288,6 +311,21 @@ if (require.main === module) {
 							env.PINF_PROGRAM_PATH = env.PIO_SERVICE_LIVE_DIRPATH + "/program.json";
 
 
+							// Copy the previous hash so we can compare it below.
+							// TODO: We should already be computing and comparing the has here
+							//       as "preparing" the service should not be necessary as
+							//       files are synced in realtime.
+							if (
+								previousResolvedConfig &&
+								previousResolvedConfig.services &&
+								previousResolvedConfig.services[alias] &&
+								previousResolvedConfig.services[alias].local &&
+								previousResolvedConfig.services[alias].local.hashes
+							) {
+								serviceConfig.local.hashes = previousResolvedConfig.services[alias].local.hashes;
+							}
+
+
 							function resolveRemote () {
 
 								var remote = serviceConfig.remote;
@@ -368,9 +406,21 @@ if (require.main === module) {
 					}
 
 					return resolveServices();
+
 				}).then(function () {
 
 	resolvedConfig.t = Date.now();
+
+		            console.log("Remote VM: " + [
+		            	'ssh',
+		                '-o', 'ConnectTimeout=5',
+		                '-o', 'ConnectionAttempts=1',
+		                '-o', 'UserKnownHostsFile=/dev/null',
+		                '-o', 'StrictHostKeyChecking=no',
+		                '-o', 'UserKnownHostsFile=/dev/null',
+		                '-o', 'IdentityFile=' + resolvedConfig.ssh.privateKeyPath,
+		                resolvedConfig.ssh.user + '@' + resolvedConfig.ssh.host
+		            ].join(" ").magenta);
 
 					return resolvedConfig;
 				});
@@ -411,6 +461,7 @@ if (require.main === module) {
 		            });
 		        }
 
+		        var uploadedServices = {};
 
 			    function uploadServices () {
 
@@ -465,15 +516,98 @@ if (require.main === module) {
 								prepareAspect("runtime"),
 								writeServiceConfigs()
 							]).then(function () {
-								return FSINDEX.indexAndWriteForm(serviceConfig.local.path, "asis");
+								return FSINDEX.indexAndWriteForm(serviceConfig.local.path, "asis").then(function () {
+
+									return API.Q.denodeify(function (callback) {
+
+										var smgFormDescriptorPath = API.PATH.join(serviceConfig.local.path, ".smg.form.json");
+										return API.FS.readFile(smgFormDescriptorPath, "utf8", function (err, data) {
+											if (err) return callback(err);
+
+											var newHash = API.CRYPTO.createHash("sha256").update(data).digest("hex");
+
+											// If the hash has changed from the previous one we
+											// record that fact so a postsync can be triggered
+											// that skips all caches (a previous cache entry may be found
+											// if a file size for an entry in '.smg.form.json' comes
+											// to a previous value but the file in fact contains
+											// different data.
+											// NOTE: This is a limitation of only checking for filesizes
+											//       instead of also taking modification times into account.
+
+											if (newHash !== serviceConfig.local.hashes[".smg.form.json"]) {
+												serviceConfig.local.hashes[".smg.form.json"] = newHash;
+
+												// We trigger an upload just because the value has changed.
+												if (!uploadedServices[alias]) {
+													uploadedServices[alias] = {};
+												}
+												uploadedServices[alias]["PIO_SKIP_SYNC_CHECKSUM_CACHE"] = "1";
+												uploadedServices[alias]["PIO_FORCE_SYNC_UPLOAD"] = "1";
+											}
+
+											return callback(null);
+										});
+									})();
+								});
 							});
 					    }
 
+					    function checkIfNeedToUpload () {
+
+					    	if (
+					    		uploadedServices[alias] &&
+					    		uploadedServices[alias]["PIO_FORCE_SYNC_UPLOAD"]
+					    	) {
+								API.console.verbose("Force upload due to 'PIO_FORCE_SYNC_UPLOAD'.");
+					    		return API.Q.resolve(true);
+					    	}
+
+							return makeAPI(resolvedConfig).then(function (api) {
+
+								var rpc = api.rpc("getServiceSyncHash", {
+									serviceId: serviceConfig.remote.addFiles["package.service.json"].env.PIO_SERVICE_ID
+								});
+								if (!rpc) {
+									API.console.verbose("No remote 'vfs' connection available. Skipping remote service sync hash fetch.");
+									// TODO: Check against local file mtime cache to see if anything changed.
+									// TODO: Use SSH connection to chec if something has changed.
+									return true;
+								}
+								return rpc.then(function (args) {
+									if (
+										!args ||
+										!args.hash
+									) {
+										// Upload in the hope of getting back a hash next time.
+										return true;
+									}
+									if (args.hash !== serviceConfig.local.hashes[".smg.form.json"]) {
+										// Changes found between local and remote.
+										return true;
+									}
+									// No changes found.
+									return false;									
+								});
+							});
+					    }
 
 				    	API.console.verbose("Upload service '" + serviceConfig.serviceId + "' from '" + serviceConfig.local.path + "' to sync path: " + serviceConfig.remote.aspects.sync.path);
 
 				    	return prepareService().then(function () {
-							return api.uploadFiles(serviceConfig.local.path, serviceConfig.remote.aspects.sync.path);
+
+				    		return checkIfNeedToUpload().then(function (needToUpload) {
+				    			if (!needToUpload) {
+							    	API.console.verbose("Skip upload as no changes detected.");
+							    	return;
+				    			}
+
+				    			if (!uploadedServices[alias]) {
+				    				uploadedServices[alias] = {};
+				    			}
+
+								return api.uploadFiles(serviceConfig.local.path, serviceConfig.remote.aspects.sync.path);
+				    		});
 				    	});
 				    }
 
@@ -492,12 +626,20 @@ if (require.main === module) {
 				}
 
 				function postsyncServices () {
-				    function postsyncService(alias, serviceConfig) {
+
+				    function postsyncService(alias, serviceConfig, extraEnv) {
+				    	var env = {};
+				    	for (var name in serviceConfig.remote.addFiles["package.service.json"].env) {
+				    		env[name] = serviceConfig.remote.addFiles["package.service.json"].env[name];
+				    	}
+				    	for (var name in extraEnv) {
+				    		env[name] = extraEnv[name];
+				    	}
 				    	API.console.verbose("Trigger postsync for service '" + serviceConfig.serviceId + "' at path: " + serviceConfig.remote.aspects.sync.path);
 				    	API.console.debug("Commands", serviceConfig.remote.aspects.source.commands.postsync);
 				    	return api.runRemoteCommands(
 							serviceConfig.remote.aspects.source.commands.postsync,
-							serviceConfig.remote.addFiles["package.service.json"].env
+							env
 						);
 				    }
 
@@ -505,9 +647,11 @@ if (require.main === module) {
 
 				    var done = API.Q.resolve();
 				    resolvedConfig.servicesOrder.forEach(function (alias) {
-				    	done = API.Q.when(done, function () {
-							return postsyncService(alias, resolvedConfig.services[alias]);
-				    	});
+				    	if (uploadedServices[alias]) {
+					    	done = API.Q.when(done, function () {
+								return postsyncService(alias, resolvedConfig.services[alias], uploadedServices[alias]);
+					    	});
+					    }
 				    });
 				    return done;
 				}

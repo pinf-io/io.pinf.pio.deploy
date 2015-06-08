@@ -87,8 +87,8 @@ require('org.pinf.genesis.lib').forModule(require, module, function (API, export
 							reconnect("consumer error", err.message);
 							return;
 						}
-	console.log("Non-fatal VFS error?", err.stack);
-	//process.exit(1);
+console.log("Non-fatal VFS error?", err.stack);
+//process.exit(1);
 					});
 					consumer.on("disconnect", function (err) {
 						reconnect("consumer disconnect", (err && err.message) || "");
@@ -102,7 +102,58 @@ require('org.pinf.genesis.lib').forModule(require, module, function (API, export
 								return;
 							}
 							API.console.verbose("Connected to remote VFS.");
+
+							function attachRPC (vfs) {
+
+								var pendingResponses = {};
+
+								vfs.on("io.pinf.pio.sync:rpc:response", function (event) {
+									if (pendingResponses[event.id]) {
+										API.console.debug("Got response for RPC Request '" + event.id + "':", event);
+										pendingResponses[event.id].resolve(event.result);
+										delete pendingResponses[event.id];
+									}
+								});
+
+								vfs.rpc = function (api, method, args) {
+							    	return API.Q.denodeify(function (callback) {
+
+							    		var requestId = API.CRYPTO.randomBytes(32).toString('hex');
+
+							    		API.console.verbose("Making RPC call to '" + (api + ":" + method) + "' with args:", args);
+
+							    		pendingResponses[requestId] = API.Q.defer();
+							    		// TODO: Timeout promise if no response after x time.
+							    		//       Do this once we can signal progress and we timeout when
+							    		//       there is no progress update for x time.
+
+							    		return vfs.emit(
+							    			"io.pinf.pio.sync:rpc:request",
+							    			API.JSONRPC.request(requestId, api, {
+							    				method: method,
+							    				args: args
+							    			}),
+							    			function (err) {
+							    				if (err) {
+							    					pendingResponses[requestId].reject(err);
+							    					return callback(err);
+							    				}
+
+												API.console.debug("RPC call to '" + (api + ":" + method) + "' sent.");
+
+												return pendingResponses[requestId].promise.then(function (response) {
+													return callback(null, response);
+												}, callback);
+							    			}
+							    		);
+							    	})();
+							    }
+							}
+
+							attachRPC(vfs);
+
 							remoteVFS = vfs;
+
 							if (onEveryNewConnection) {
 								try {
 									onEveryNewConnection(remoteVFS, statusEvents);

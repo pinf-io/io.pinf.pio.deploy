@@ -26,18 +26,81 @@ require('org.pinf.genesis.lib').forModule(require, module, function (API, export
 
 	logger.info("config", config);
 
-
-	var vfs = VFS_LOCAL({
-		root: "/",
-		checkSymlinks: true
-	});
-
-	var worker = new VFS_SOCKET_WORKER(vfs);
-
-
 	NET.createServer(function handler (socket) {
 
 		logger.info("New socket connection");
+
+		var vfs = VFS_LOCAL({
+			root: "/",
+			checkSymlinks: true
+		});
+
+		function handleRemoteProcedureCall (apiAlias, method, args) {
+			if (
+				typeof API[apiAlias] === "undefined" ||
+				typeof API[apiAlias].for !== "function"
+			) {
+				throw new Error("API with alias '" + apiAlias + "' not found!");
+			}
+			return API.Q.when(API[apiAlias].for(API)).then(function (api) {
+				if (!api) {
+					throw new Error("API with alias '" + apiAlias + "' could not be loaded!");
+				}
+				if (typeof api[method] !== "function") {
+					throw new Error("Method '" + method + "' not implemented for API with alias '" + apiAlias + "'");
+				}
+				console.log("Handle remote procedure call:", apiAlias, method, args);
+				return API.Q.when(api[method](args));
+			});
+		}
+
+		vfs.on("io.pinf.pio.sync:rpc:request", function (event) {
+			try {
+				handleRemoteProcedureCall(
+					event.method,
+					event.params.method,
+					event.params.args
+				).then(function (response) {
+					vfs.emit(
+						"io.pinf.pio.sync:rpc:response",
+						API.JSONRPC.success(
+							event.id,
+							response
+						),
+						function (err) {
+							if (err) {
+								console.error("Error sending RPC success response:", err.stack);
+							}
+						}
+					);
+				}, function (err) {
+					throw err;
+				});
+			} catch (err) {
+				console.error('Error in RPC request handler', err.stack);
+				vfs.emit(
+					"io.pinf.pio.sync:rpc:response",
+					API.JSONRPC.error(
+						event.id,
+						new API.JSONRPC.JsonRpcError(
+							'Error in RPC request handler',
+							500
+						)
+					),
+					function (err) {
+						if (err) {
+							console.error("Error sending RPC error response:", err.stack);
+						}
+					}
+				);
+			}
+		}, function (err) {
+			if (err) {
+				console.error("Error adding VFS event handler 'io.pinf.pio.sync:rpc':", err.stack);
+			}
+		});
+
+		var worker = new VFS_SOCKET_WORKER(vfs);
 
 		var streamRouter = STREAM_ROUTER();
 
@@ -54,8 +117,9 @@ require('org.pinf.genesis.lib').forModule(require, module, function (API, export
 
 				});
 				worker.on("disconnect", function (err) {
-					if (err) throw err;
-
+					if (err) {
+						console.error("Socket disconnect error", err.stack);
+					}
 				});
 			});
 
