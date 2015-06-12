@@ -409,7 +409,7 @@ if (require.main === module) {
 
 				}).then(function () {
 
-	resolvedConfig.t = Date.now();
+//	resolvedConfig.t = Date.now();
 
 		            console.log("Remote VM: " + [
 		            	'ssh',
@@ -427,7 +427,7 @@ if (require.main === module) {
 			});
 		}
 
-		exports.turn = function (resolvedConfig) {
+		exports.turn = function (resolvedConfig, helpers) {
 
 			return makeAPI(resolvedConfig).then(function (api) {
 
@@ -544,6 +544,10 @@ if (require.main === module) {
 												}
 												uploadedServices[alias]["PIO_SKIP_SYNC_CHECKSUM_CACHE"] = "1";
 												uploadedServices[alias]["PIO_FORCE_SYNC_UPLOAD"] = "1";
+
+												return helpers.saveResolvedConfig().then(function () {
+													return callback(null);
+												}, callback);
 											}
 
 											return callback(null);
