@@ -124,6 +124,8 @@ if (require.main === module) {
 
 		    	// TODO: Use VFS connection to upload files if available.
 
+		    	API.console.debug("Do upload files from '" + sourcePath + "' to '" + targetPath);
+
 				return API.Q.denodeify(RSYNC.sync)({
 		            sourcePath: sourcePath,
 		            targetPath: targetPath,
@@ -473,6 +475,9 @@ if (require.main === module) {
 					    	if (API.Q.isPromise(EXPORT)) throw new Error("'EXPORT' should be resolved to an object by now! We should never get here! Time to improve the hack!");
 
 							function prepareAspect (aspect) {
+
+						    	API.console.debug("Prepare '" + aspect + "' aspect for service '" + serviceConfig.serviceId + "'");
+
 								var paths = serviceConfig.local.aspects[aspect].sourcePath;
 								if (!Array.isArray(paths)) {
 									paths = [
@@ -482,24 +487,43 @@ if (require.main === module) {
 								var done = API.Q.resolve();
 								paths.forEach(function (path) {
 									done = API.Q.when(done, function () {
+
+								    	API.console.debug("Export path '" + path + "' for aspect '" + aspect + "' for service '" + serviceConfig.serviceId + "'");
+
 								    	return EXPORT.export(
 								    		path,
 								    		serviceConfig.local.aspects[aspect].path,
 								    		"snapshot"
-								    	);
+								    	).then(function () {
+									    	API.console.debug("Export path '" + path + "' for aspect '" + aspect + "' for service '" + serviceConfig.serviceId + "' done");
+								    	});
 									});
 								});
 								return done.then(function () {
-									return EXPORT.addFile(
+
+							    	API.console.debug("Write local overlays for aspect '" + aspect + "' for service '" + serviceConfig.serviceId + "'");
+
+									return EXPORT.addOrReplaceFile(
 										API.PATH.join(serviceConfig.local.aspects[aspect].path, "package.local.json"),
 										JSON.stringify(serviceConfig.local.aspects[aspect].addFiles["package.local.json"], null, 4)
-						    		);
-						    	});
+						    		).then(function () {
+
+								    	API.console.debug("Write local overlays for aspect '" + aspect + "' for service '" + serviceConfig.serviceId + "' done");
+						    		});
+						    	}).then(function () {
+							    	API.console.debug("Prepare '" + aspect + "' aspect for service '" + serviceConfig.serviceId + "' done");
+								});;
 							}
 
 							function writeServiceConfigs () {
+
+						    	API.console.debug("Write service configs for service '" + serviceConfig.serviceId + "'");
+
 								return API.Q.all(Object.keys(serviceConfig.remote.addFiles).map(function (filename) {
 									return API.Q.denodeify(function (callback) {
+
+								    	API.console.debug("Output file '" + API.PATH.join(serviceConfig.local.path, filename) + "' for service '" + serviceConfig.serviceId + "'");
+
 										return API.FS.outputFile(
 											API.PATH.join(serviceConfig.local.path, filename),
 											JSON.stringify(serviceConfig.remote.addFiles[filename], null, 4),
@@ -507,16 +531,33 @@ if (require.main === module) {
 							    			callback
 							    		);
 									})();
-								}));
-
+								})).fail(function (err) {
+									console.error(err.stack);
+									throw err;
+								}).then(function () {
+							    	API.console.debug("Write service configs for service '" + serviceConfig.serviceId + "' done");
+								});
 							}
+
+/*
+							return prepareAspect("source").then(function () {
+								return prepareAspect("runtime").then(function () {
+									return writeServiceConfigs();
+								});
+							}).then(function () {
+*/
 
 							return API.Q.all([
 								prepareAspect("source"),
 								prepareAspect("runtime"),
 								writeServiceConfigs()
 							]).then(function () {
+
+						    	API.console.debug("Run FS index for service '" + serviceConfig.serviceId + "'");
+
 								return FSINDEX.indexAndWriteForm(serviceConfig.local.path, "asis").then(function () {
+
+							    	API.console.debug("FS index run for service '" + serviceConfig.serviceId + "' done");
 
 									return API.Q.denodeify(function (callback) {
 
@@ -596,9 +637,11 @@ if (require.main === module) {
 							});
 					    }
 
-				    	API.console.verbose("Upload service '" + serviceConfig.serviceId + "' from '" + serviceConfig.local.path + "' to sync path: " + serviceConfig.remote.aspects.sync.path);
+				    	API.console.verbose("Check if need to upload service '" + serviceConfig.serviceId + "' from '" + serviceConfig.local.path + "' to sync path: " + serviceConfig.remote.aspects.sync.path);
 
 				    	return prepareService().then(function () {
+
+					    	API.console.debug("Service '" + serviceConfig.serviceId + "' prepared");
 
 				    		return checkIfNeedToUpload().then(function (needToUpload) {
 				    			if (!needToUpload) {
@@ -619,6 +662,7 @@ if (require.main === module) {
 
 				    var deferred = API.Q.defer();
 					var throttle = API.Q.Throttle(5);
+//					var throttle = API.Q.Throttle(1);
 					throttle.on("error", deferred.reject);
 					throttle.on("done", deferred.resolve);
 					resolvedConfig.servicesOrder.forEach(function (alias) {
