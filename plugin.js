@@ -216,7 +216,13 @@ if (require.main === module) {
 						function prepareService (alias) {
 
 							// TODO: Support more advanced locators.
-							var sourcePath = API.PATH.dirname(require.resolve(resolvedConfig.services[alias].location + "/package.json"));
+							try {
+								var sourcePath = API.PATH.dirname(require.resolve(resolvedConfig.services[alias].location + "/package.json"));
+							} catch(err) {
+console.log("Error Resolving alias", alias);
+console.log("resolvedConfig.services[alias]", resolvedConfig.services[alias]);
+								throw err;
+							}
 							var serviceId = alias;
 							var preparedPath = API.PATH.join(API.getTargetPath(), "sync", serviceId);
 
