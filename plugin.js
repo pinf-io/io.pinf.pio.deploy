@@ -219,8 +219,11 @@ if (require.main === module) {
 							try {
 								var sourcePath = API.PATH.dirname(require.resolve(resolvedConfig.services[alias].location + "/package.json"));
 							} catch(err) {
-console.log("Error Resolving alias", alias);
-console.log("resolvedConfig.services[alias]", resolvedConfig.services[alias]);
+								console.log("Error Resolving alias", alias);
+								console.log("resolvedConfig.services[alias]", resolvedConfig.services[alias]);
+								if (!resolvedConfig.services[alias].location) {
+									console.error("You must specify the 'location' property for the service!");
+								}
 								throw err;
 							}
 							var serviceId = alias;
